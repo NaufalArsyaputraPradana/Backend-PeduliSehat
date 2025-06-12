@@ -7,49 +7,42 @@ import cookieParser from "cookie-parser";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-import { fileURLToPath } from "url"; // Required for __dirname equivalent in ES Modules
+import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const salt = 10;
+const authPort = 8081;
+const mlPort = 3000;
+
 const app = express();
-const port = process.env.PORT || 3000; // Use process.env.PORT for Railway, fallback to 3000
 
 // Middleware
 app.use(express.json());
 app.use(
   cors({
-    origin: ["https://backend-pedulisehat-production.up.railway.app"], // Updated origin
+    origin: ["http://localhost:5173"],
     methods: ["POST", "GET"],
     credentials: true,
   })
 );
 app.use(cookieParser());
+app.use(express.static("."));
 
-// Serve static files from the current directory (for files like selected_gejala_v2.json)
-app.use(express.static(__dirname));
-
-// --- Database Connection (MySQL for user authentication and detection history) ---
+// Database connection
 const db = mysql.createConnection({
-  host: "localhost", // Assuming database is local or configured via environment variables on Railway
+  host: "localhost",
   user: "root",
   password: "",
-  database: "user_auth", // Ensure this database exists and has the 'login' and 'detection_history' tables
+  database: "user_auth",
 });
 
-// Test MySQL connection
-db.connect((err) => {
-  if (err) {
-    console.error("Error connecting to MySQL database:", err);
-    return;
-  }
-  console.log("Connected to MySQL database.");
-});
+// Dapatkan path absolut ke Python di lingkungan virtual
+const pythonPath = path.join(__dirname, "venv", "Scripts", "python.exe");
 
-// --- User Authentication and Authorization Middleware ---
+// ==================== AUTHENTICATION ROUTES ====================
 
-// Middleware to verify JWT token and attach user name to request
 const verifyUser = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
@@ -66,118 +59,49 @@ const verifyUser = (req, res, next) => {
   }
 };
 
-// Middleware to get user ID from token and database
-const getUserId = (req, res, next) => {
-  const token = req.cookies.token;
-  if (!token) {
-    return res.json({ Error: "Anda belum terautentikasi" });
-  }
-
-  jwt.verify(token, "jwt-secret-key", (err, decoded) => {
-    if (err) {
-      return res.json({ Error: "Token tidak valid" });
-    }
-
-    // Get user ID from the database using the decoded name
-    const sql = "SELECT id FROM login WHERE name = ?";
-    db.query(sql, [decoded.name], (err, result) => {
-      if (err) {
-        console.error("Error fetching user ID:", err);
-        return res.json({ Error: "Error database saat mengambil ID pengguna" });
-      }
-      if (result.length === 0) {
-        return res.json({ Error: "Pengguna tidak ditemukan" });
-      }
-
-      req.userId = result[0].id; // Attach userId to the request
-      next();
-    });
-  });
-};
-
-// --- Authentication Routes ---
-
-// Check if user is logged in
 app.get("/is-logged-in", (req, res) => {
   const token = req.cookies.token;
   if (!token) {
     return res.json({ Status: "Error", Error: "Belum terautentikasi" });
   }
-
+  
   jwt.verify(token, "jwt-secret-key", (err, decoded) => {
     if (err) {
       return res.json({ Status: "Error", Error: "Token tidak valid" });
     }
-
-    // Get user information from the database
+    
     const sql = "SELECT name FROM login WHERE name = ?";
     db.query(sql, [decoded.name], (err, result) => {
       if (err || result.length === 0) {
-        console.error("Error fetching user for /is-logged-in:", err);
-        return res.json({ Status: "Error", Error: "Pengguna tidak ditemukan atau error database" });
+        return res.json({ Status: "Error", Error: "Pengguna tidak ditemukan" });
       }
       return res.json({ Status: "Success", name: result[0].name });
     });
   });
 });
 
-// User registration
 app.post("/register", (req, res) => {
-  const { name, email, password } = req.body;
-  if (!name || !email || !password) {
-    return res.json({ Error: "Nama, email, dan password harus diisi" });
-  }
-
-  const checkSql = "SELECT email FROM login WHERE email = ?";
-  db.query(checkSql, [email], (err, result) => {
-    if (err) {
-      console.error("Error checking existing email:", err);
-      return res.json({ Error: "Error server saat memeriksa email" });
-    }
-    if (result.length > 0) {
-      return res.json({ Error: "Email sudah terdaftar" });
-    }
-
-    bcrypt.hash(password.toString(), salt, (err, hash) => {
-      if (err) {
-        console.error("Error hashing password:", err);
-        return res.json({ Error: "Error saat mengenkripsi password" });
-      }
-      const sql = "INSERT INTO login (`name`,`email`,`password`) VALUES (?)";
-      const values = [name, email, hash];
-      db.query(sql, [values], (err, result) => {
-        if (err) {
-          console.error("Error inserting user data:", err);
-          return res.json({ Error: "Error data di Server" });
-        }
-        return res.json({ Status: "Success" });
-      });
+  const sql = "INSERT INTO login (`name`,`email`,`password`) VALUES (?)";
+  bcrypt.hash(req.body.password.toString(), salt, (err, hash) => {
+    if (err) return res.json({ Error: "Error saat mengenkripsi password" });
+    const values = [req.body.name, req.body.email, hash];
+    db.query(sql, [values], (err, result) => {
+      if (err) return res.json({ Error: "Error data di Server" });
+      return res.json({ Status: "Success" });
     });
   });
 });
 
-// User login
 app.post("/login", (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.json({ Error: "Email dan password harus diisi" });
-  }
-
   const sql = "SELECT * FROM login WHERE email = ?";
-  db.query(sql, [email], (err, data) => {
-    if (err) {
-      console.error("Error during login database query:", err);
-      return res.json({ Error: "Error login di Server" });
-    }
+  db.query(sql, [req.body.email], (err, data) => {
+    if (err) return res.json({ Error: "Error login di Server" });
     if (data.length > 0) {
       bcrypt.compare(
-        password.toString(),
+        req.body.password.toString(),
         data[0].password,
         (err, response) => {
-          if (err) {
-            console.error("Error comparing password:", err);
-            return res.json({ Error: "Error membandingkan password" });
-          }
+          if (err) return res.json({ Error: "Error membandingkan password" });
           if (response) {
             const name = data[0].name;
             const token = jwt.sign({ name }, "jwt-secret-key", {
@@ -185,9 +109,9 @@ app.post("/login", (req, res) => {
             });
             res.cookie("token", token, {
               httpOnly: true,
-              secure: process.env.NODE_ENV === "production", // Use secure cookies in production
-              sameSite: "strict", // Strict samesite policy
-              maxAge: 24 * 60 * 60 * 1000, // 1 day
+              secure: process.env.NODE_ENV === "production",
+              sameSite: "strict",
+              maxAge: 24 * 60 * 60 * 1000 // 1 hari
             });
             return res.json({ Status: "Success", name: name });
           } else {
@@ -201,25 +125,37 @@ app.post("/login", (req, res) => {
   });
 });
 
-// User logout
 app.get("/logout", (req, res) => {
-  res.clearCookie("token", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
-  });
+  res.clearCookie("token");
   return res.json({ Status: "Success" });
 });
 
-// --- Detection History Routes ---
-
-// Save detection history
-app.post("/save-detection", getUserId, (req, res) => {
-  const { symptoms, detection_result } = req.body;
-  if (!symptoms || !detection_result) {
-    return res.json({ Error: "Gejala dan hasil deteksi harus diisi" });
+// Dapatkan ID pengguna dari token
+const getUserId = (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) {
+    return res.json({ Error: "Anda belum terautentikasi" });
   }
 
+  jwt.verify(token, "jwt-secret-key", (err, decoded) => {
+    if (err) {
+      return res.json({ Error: "Token tidak valid" });
+    }
+
+    const sql = "SELECT id FROM login WHERE name = ?";
+    db.query(sql, [decoded.name], (err, result) => {
+      if (err) return res.json({ Error: "Error database" });
+      if (result.length === 0) return res.json({ Error: "Pengguna tidak ditemukan" });
+
+      req.userId = result[0].id;
+      next();
+    });
+  });
+};
+
+// Simpan riwayat deteksi
+app.post("/save-detection", getUserId, (req, res) => {
+  const { symptoms, detection_result } = req.body;
   const sql =
     "INSERT INTO detection_history (user_id, symptoms, detection_result) VALUES (?, ?, ?)";
 
@@ -227,27 +163,20 @@ app.post("/save-detection", getUserId, (req, res) => {
     sql,
     [req.userId, JSON.stringify(symptoms), detection_result],
     (err, result) => {
-      if (err) {
-        console.error("Error saving detection history:", err);
-        return res.json({ Error: "Error menyimpan riwayat deteksi" });
-      }
+      if (err) return res.json({ Error: "Error menyimpan riwayat deteksi" });
       return res.json({ Status: "Success", id: result.insertId });
     }
   );
 });
 
-// Get detection history for a user
+// Dapatkan riwayat deteksi pengguna
 app.get("/detection-history", getUserId, (req, res) => {
   const sql =
     "SELECT * FROM detection_history WHERE user_id = ? ORDER BY created_at DESC";
 
   db.query(sql, [req.userId], (err, result) => {
-    if (err) {
-      console.error("Error fetching detection history:", err);
-      return res.json({ Error: "Error mengambil riwayat deteksi" });
-    }
+    if (err) return res.json({ Error: "Error mengambil riwayat deteksi" });
 
-    // Parse JSON string symptoms back to object
     const history = result.map((record) => ({
       ...record,
       symptoms: JSON.parse(record.symptoms),
@@ -257,17 +186,13 @@ app.get("/detection-history", getUserId, (req, res) => {
   });
 });
 
-// --- Python Prediction Routes ---
+// ==================== MACHINE LEARNING ROUTES ====================
 
-// Get absolute path to Python in the virtual environment
-// Assuming venv is at the same level as server.js
-const pythonPath = path.join(__dirname, "venv", "Scripts", "python.exe");
-
-// Get list of symptoms from JSON file
+// Dapatkan daftar gejala
 app.get("/symptoms", async (req, res) => {
   try {
     console.log("Membaca gejala dari selected_gejala_v2.json");
-    const data = await fs.readFile(path.join(__dirname, "selected_gejala_v2.json"), "utf8");
+    const data = await fs.readFile("selected_gejala_v2.json", "utf8");
     const symptoms = JSON.parse(data);
     console.log(`Ditemukan ${symptoms.length} gejala`);
     res.json({
@@ -283,7 +208,7 @@ app.get("/symptoms", async (req, res) => {
   }
 });
 
-// Perform prediction using Python script
+// Lakukan prediksi
 app.post("/predict", async (req, res) => {
   const symptoms = req.body.symptoms;
   if (!symptoms || !Array.isArray(symptoms)) {
@@ -294,10 +219,8 @@ app.post("/predict", async (req, res) => {
   }
 
   try {
-    const tempInputPath = path.join(__dirname, "temp_input.json");
-    await fs.writeFile(tempInputPath, JSON.stringify(symptoms));
+    await fs.writeFile("temp_input.json", JSON.stringify(symptoms));
 
-    // Spawn Python child process
     const python = spawn(pythonPath, ["predict.py"]);
     let dataString = "";
     let errorString = "";
@@ -311,12 +234,12 @@ app.post("/predict", async (req, res) => {
       errorString += data.toString();
     });
 
-    python.on("close", async (code) => {
+    python.on("close", (code) => {
       try {
-        // Only try to delete if the file exists
-        await fs.access(tempInputPath)
-          .then(() => fs.unlink(tempInputPath))
-          .catch(() => {}); // Ignore if file doesn't exist or other unlink error
+        // Hanya coba hapus jika file ada
+        fs.access("temp_input.json")
+          .then(() => fs.unlink("temp_input.json"))
+          .catch(() => {}); // Abaikan jika file tidak ada
 
         if (code !== 0) {
           console.error("Proses Python keluar dengan kode:", code);
@@ -330,7 +253,7 @@ app.post("/predict", async (req, res) => {
         const result = JSON.parse(dataString);
         res.json(result);
       } catch (error) {
-        console.error("Error processing Python result:", error);
+        console.error("Error memproses hasil:", error);
         res.status(500).json({
           success: false,
           error: "Error memproses hasil prediksi",
@@ -338,7 +261,7 @@ app.post("/predict", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Server error during prediction:", error);
+    console.error("Error server:", error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -346,15 +269,16 @@ app.post("/predict", async (req, res) => {
   }
 });
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server berjalan di http://localhost:${port}`); // For local testing
-  console.log(`Aplikasi mungkin juga berjalan di: https://backend-pedulisehat-production.up.railway.app`); // For Railway deployment
+// Start server
+app.listen(authPort, () => {
+  console.log(`Authentication server berjalan di http://localhost:${authPort}`);
+});
+
+app.listen(mlPort, () => {
+  console.log(`ML server berjalan di http://localhost:${mlPort}`);
   console.log("Menggunakan Python dari:", pythonPath);
   console.log("Pastikan Anda memiliki semua file yang diperlukan:");
-  console.log("- predict.py");
   console.log("- train1_model_v2.joblib");
   console.log("- label_train_v2.joblib");
   console.log("- selected_gejala_v2.json");
-  console.log("Dan pastikan Anda memiliki database MySQL 'user_auth' dengan tabel 'login' dan 'detection_history'.");
 });
